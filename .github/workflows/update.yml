@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Syncs Formula/mcp-re.rb from the newest MCP-RE release. The formula is a release asset
-# of the main repository; this workflow verifies it, proves it installs, upgrades and
-# uninstalls on a clean runner, and only then commits it. Uses this repository's own token:
+# Syncs Formula/mcp-re.rb from the newest MCP-RE release: the main repository's formula
+# template, rendered with the version and SHA-256 of the release's attested Apple Silicon
+# archive. It proves the result installs, upgrades and uninstalls on a clean runner, and
+# only then commits it. Uses this repository's own token:
 # there is no credential for the main repository, which is public.
 name: update
 
@@ -28,7 +29,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Fetch and verify the newest release's formula
+      - name: Verify the newest release and render the formula
         id: fetch
         env:
           GH_TOKEN: ${{ github.token }}
@@ -36,20 +37,21 @@ jobs:
           set -euo pipefail
           tag="$(gh release view --repo "$UPSTREAM" --json tagName --jq .tagName)"
           version="${tag#v}"
+          archive="mcp-re-${version}-darwin-arm64.tar.gz"
           mkdir dl
-          if ! gh release download "$tag" --repo "$UPSTREAM" --dir dl \
-              --pattern mcp-re.rb --pattern SHA256SUMS --pattern "mcp-re-${version}-darwin-arm64.tar.gz" 2>/dev/null \
-              || [ ! -f dl/mcp-re.rb ]; then
-            echo "release $tag carries no Homebrew formula yet; nothing to sync"
+          if ! gh release download "$tag" --repo "$UPSTREAM" --dir dl --pattern SHA256SUMS --pattern "$archive" 2>/dev/null \
+              || [ ! -f "dl/$archive" ]; then
+            echo "release $tag carries no Apple Silicon archive yet; nothing to sync"
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          gh attestation verify dl/mcp-re.rb --repo "$UPSTREAM"
-          gh attestation verify "dl/mcp-re-${version}-darwin-arm64.tar.gz" --repo "$UPSTREAM"
-          (cd dl && grep "mcp-re-${version}-darwin-arm64.tar.gz" SHA256SUMS | shasum -a 256 -c -)
-          want="$(awk '/darwin-arm64/ {print $1}' dl/SHA256SUMS)"
-          grep -q "sha256 \"${want}\"" dl/mcp-re.rb
-          grep -q "download/${tag}/mcp-re-${version}-darwin-arm64.tar.gz" dl/mcp-re.rb
+          gh attestation verify "dl/$archive" --repo "$UPSTREAM"
+          (cd dl && grep " $archive\$" SHA256SUMS | shasum -a 256 -c -)
+          sha="$(awk -v f="$archive" '$2 == f {print $1}' dl/SHA256SUMS)"
+          # The template is the main repository's; the version and checksum are the verified release's.
+          gh api "repos/$UPSTREAM/contents/packaging/homebrew/mcp-re.rb.in?ref=main" --jq .content | base64 -d > dl/template
+          sed -e "s/@VERSION@/${version}/g" -e "s/@SHA256@/${sha}/" dl/template > dl/mcp-re.rb
+          if grep -q '@[A-Z_]*@' dl/mcp-re.rb; then echo "unrendered placeholder" >&2; exit 1; fi
           if cmp -s dl/mcp-re.rb Formula/mcp-re.rb 2>/dev/null; then
             echo "Formula/mcp-re.rb already at $tag"
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -73,7 +75,7 @@ jobs:
             echo "installed previous $previous"
           fi
           cp dl/mcp-re.rb "$dir/mcp-re.rb"
-          brew audit --strict --formula local/mcp-re/mcp-re
+          brew audit --strict --online --formula local/mcp-re/mcp-re
           if [ -n "${previous:-}" ]; then
             brew upgrade local/mcp-re/mcp-re
           else
