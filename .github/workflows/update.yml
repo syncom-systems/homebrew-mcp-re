@@ -1,0 +1,110 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Syncs Formula/mcp-re.rb from the newest MCP-RE release. The formula is a release asset
+# of the main repository; this workflow verifies it, proves it installs, upgrades and
+# uninstalls on a clean runner, and only then commits it. Uses this repository's own token:
+# there is no credential for the main repository, which is public.
+name: update
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM: syncom-systems/mcp-re
+  HOMEBREW_NO_AUTO_UPDATE: "1"
+  HOMEBREW_NO_INSTALL_FROM_API: "1"
+
+jobs:
+  sync:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Fetch and verify the newest release's formula
+        id: fetch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh release view --repo "$UPSTREAM" --json tagName --jq .tagName)"
+          version="${tag#v}"
+          mkdir dl
+          if ! gh release download "$tag" --repo "$UPSTREAM" --dir dl \
+              --pattern mcp-re.rb --pattern SHA256SUMS --pattern "mcp-re-${version}-darwin-arm64.tar.gz" 2>/dev/null \
+              || [ ! -f dl/mcp-re.rb ]; then
+            echo "release $tag carries no Homebrew formula yet; nothing to sync"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh attestation verify dl/mcp-re.rb --repo "$UPSTREAM"
+          gh attestation verify "dl/mcp-re-${version}-darwin-arm64.tar.gz" --repo "$UPSTREAM"
+          (cd dl && grep "mcp-re-${version}-darwin-arm64.tar.gz" SHA256SUMS | shasum -a 256 -c -)
+          want="$(awk '/darwin-arm64/ {print $1}' dl/SHA256SUMS)"
+          grep -q "sha256 \"${want}\"" dl/mcp-re.rb
+          grep -q "download/${tag}/mcp-re-${version}-darwin-arm64.tar.gz" dl/mcp-re.rb
+          if cmp -s dl/mcp-re.rb Formula/mcp-re.rb 2>/dev/null; then
+            echo "Formula/mcp-re.rb already at $tag"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Prove the new formula on a clean runner, including the upgrade
+        if: steps.fetch.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          version="${{ steps.fetch.outputs.version }}"
+          if command -v mcp-re-proxy >/dev/null; then echo "already installed on this runner" >&2; exit 1; fi
+          brew tap-new --no-git local/mcp-re
+          dir="$(brew --repository local/mcp-re)/Formula"
+          if [ -f Formula/mcp-re.rb ]; then
+            cp Formula/mcp-re.rb "$dir/mcp-re.rb"
+            brew install local/mcp-re/mcp-re
+            previous="$(brew list --versions mcp-re | awk '{print $2}')"
+            echo "installed previous $previous"
+          fi
+          cp dl/mcp-re.rb "$dir/mcp-re.rb"
+          brew audit --strict --formula local/mcp-re/mcp-re
+          if [ -n "${previous:-}" ]; then
+            brew upgrade local/mcp-re/mcp-re
+          else
+            brew install local/mcp-re/mcp-re
+          fi
+          test "$(brew list --versions mcp-re | awk '{print $2}')" = "$version"
+          brew test local/mcp-re/mcp-re
+          brew uninstall mcp-re
+          if command -v mcp-re-proxy >/dev/null; then echo "survived uninstall" >&2; exit 1; fi
+          brew untap local/mcp-re
+
+      - name: Commit
+        if: steps.fetch.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p Formula
+          cp dl/mcp-re.rb Formula/mcp-re.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/mcp-re.rb
+          git commit -m "mcp-re ${{ steps.fetch.outputs.version }}"
+          git push origin HEAD:main
+
+      - name: Install from the published tap
+        if: steps.fetch.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          version="${{ steps.fetch.outputs.version }}"
+          brew tap syncom-systems/mcp-re
+          brew install syncom-systems/mcp-re/mcp-re
+          test "$(brew list --versions mcp-re | awk '{print $2}')" = "$version"
+          brew test syncom-systems/mcp-re/mcp-re
+          brew uninstall mcp-re
+          brew untap syncom-systems/mcp-re
