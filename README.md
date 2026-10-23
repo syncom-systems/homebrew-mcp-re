@@ -17,15 +17,13 @@ take the binary archive or the container image from the
 
 ## Where the formula comes from
 
-`Formula/mcp-re.rb` is not written by hand. The release workflow in the main repository
-builds the Apple Silicon archive with Bazel, attests it, and attaches a rendered
-`mcp-re.rb` to the release. The `update` workflow in this repository fetches that file
-from the newest release, and commits it only after
-
-- the formula and the archive both pass `gh attestation verify` against the main repository,
-- the formula's `sha256` equals the release's `SHA256SUMS` entry for the archive,
-- `brew audit --strict`, `brew install`, `brew test` and an upgrade from the previously
-  published formula succeed on a clean macOS runner.
+`Formula/mcp-re.rb` is not written by hand. The `update` workflow in this repository takes
+the newest release of the main repository, checks that its Apple Silicon archive passes
+`gh attestation verify` and matches the release's `SHA256SUMS`, renders the main
+repository's formula template (`packaging/homebrew/mcp-re.rb.in`) with that version and
+checksum, and commits the result only after `brew audit --strict`, `brew install`,
+`brew test` and an upgrade from the previously published formula succeed on a clean macOS
+runner.
 
 The formula installs the released binary. It never compiles MCP-RE.
 
